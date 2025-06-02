@@ -1,1 +1,1 @@
-web: python tokenizer_test.py
+web: python tokenizer.py
