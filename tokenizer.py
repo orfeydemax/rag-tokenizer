@@ -9,37 +9,39 @@ app = Flask(__name__)
 def clean_text(text: str) -> str:
     """
     Очищает входной текст от артефактов:
-    1) Убирает BOM (U+FEFF) в начале строки, если есть.
-    2) Заменяет символ Replacement Character '�' (U+FFFD) на пробел.
-    3) Удаляет любые символы с Unicode-категорией 'C' (Control, Format, Private Use, Surrogate и т.д.).
+    1) Убирает BOM (U+FEFF) в начале строки, если он есть.
+    2) Приводит к строке Python и заменяет '�' (U+FFFD) сразу на пробел.
+    3) Удаляет все символы категории 'C*' (Control) и 'So' (Symbol, Other), заменяя их на пробел.
     4) Заменяет 'null' (в любом регистре) на пробел.
     5) Сводит несколько пробелов подряд к одному.
     """
-    # 1) Если в начале стоит BOM (U+FEFF), убираем его
+    # 1) Если есть BOM (Byte Order Mark) в начале, убираем его
     if text.startswith("\ufeff"):
         text = text[1:]
 
-    # 2) Заменяем символ Replacement Character '�' (U+FFFD) на пробел
+    # 2) Явно меняем символ Replacement Character '�' (U+FFFD) на пробел
     text = text.replace("\ufffd", " ")
 
-    # 3) Удаляем все символы, у которых Unicode-категория начинается на 'C'
-    #    (такие символы — управляющие, форматирующие, неназначенные и т.д.)
+    # 3) Пробегаем по всем символам, смотрим их Unicode-категории.
+    #    - Control-символы (категория 'C*') и Replacement (U+FFFD, категория 'So') → ставим вместо них пробел.
+    #    - Всё остальное оставляем «как есть».
     cleaned_chars = []
     for ch in text:
         cat = unicodedata.category(ch)
-        if not cat.startswith("C"):
-            cleaned_chars.append(ch)
-        else:
-            # Вместо этих символов просто ставим пробел, чтобы не сломать слова
+        # Если символ — любая категория, начинающаяся на 'C' (Control), 
+        # или точная категория 'So' (Symbol, Other), то считаем его «артефактом»
+        if cat.startswith("C") or cat == "So":
             cleaned_chars.append(" ")
+        else:
+            cleaned_chars.append(ch)
     text = "".join(cleaned_chars)
 
-    # 4) Заменяем "null" в любом регистре на пробел
-    #    re.IGNORECASE позволяет удалить 'null', 'NULL', 'Null' и т.д.
+    # 4) Заменяем 'null' в любом регистре на пробел
+    #    Например, 'null', 'NULL', 'Null' → ' '
     text = re.sub(r"null", " ", text, flags=re.IGNORECASE)
 
-    # 5) Сводим подряд идущие пробелы к одному
-    #    Например, если получилось несколько пробелов из-за удаления символов категорий 'C'
+    # 5) Делаем цикл, чтобы свести подряд идущие пробелы к одному
+    #    Например, 'Привет   мир' → 'Привет мир'
     while "  " in text:
         text = text.replace("  ", " ")
 
@@ -73,7 +75,6 @@ def split_chunks_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str
     tokens = encoding.encode(text)
     chunks: list[str] = []
 
-    # Шаг: сколько смещаться дальше, чтобы сделать следующий chunk
     step = chunk_size - overlap
     if step <= 0:
         step = chunk_size
@@ -83,7 +84,6 @@ def split_chunks_by_tokens(text: str, chunk_size: int, overlap: int) -> list[str
         try:
             decoded = encoding.decode(chunk_tokens)
         except Exception:
-            # В случае ошибки декодирования возвращаем пустую строку
             decoded = ""
         chunks.append(decoded)
 
@@ -97,7 +97,7 @@ def split() -> Response:
     Принимает JSON: { "text": "<любой текст>" }
     Возвращает JSON: { "chunks": [ "<чанк1>", "<чанк2>", ... ] }
     """
-    # 1) Парсим JSON из тела запроса
+    # 1) Пробуем распарсить JSON
     try:
         data = request.get_json(force=True)
     except Exception as e:
@@ -110,7 +110,7 @@ def split() -> Response:
             content_type="application/json",
         )
 
-    # 2) Проверяем, что JSON — это словарь
+    # 2) Убедимся, что получили словарь
     if not isinstance(data, dict):
         return Response(
             json.dumps({"error": "Ожидался JSON-объект"}, ensure_ascii=False),
@@ -123,26 +123,27 @@ def split() -> Response:
     if raw_text is None:
         return Response(
             json.dumps(
-                {"error": "В теле запроса отсутствует ключ 'text'"}, ensure_ascii=False
+                {"error": "В теле запроса отсутствует ключ 'text'"},
+                ensure_ascii=False,
             ),
             status=400,
             content_type="application/json",
         )
 
-    # 4) Очищаем текст от артефактов
+    # 4) Очищаем текст от всех артефактов
     text = clean_text(str(raw_text))
 
-    # 5) Автоподбираем chunk_size и overlap
+    # 5) Динамически подбираем chunk_size и overlap
     chunk_size, overlap = pick_chunk_params(text)
 
-    # 6) Разбиваем на чанки
+    # 6) Разбиваем очищённый текст на чанки
     chunks = split_chunks_by_tokens(text, chunk_size, overlap)
 
-    # 7) Возвращаем JSON-ответ (ensure_ascii=False для корректного отображения кириллицы)
+    # 7) Возвращаем JSON-ответ
     response_body = json.dumps({"chunks": chunks}, ensure_ascii=False)
     return Response(response_body, content_type="application/json")
 
 
 if __name__ == "__main__":
-    # Запуск локального сервера для отладки
+    # Запуск локального Flask-сервера для отладки
     app.run(host="0.0.0.0", port=5555, debug=True)
